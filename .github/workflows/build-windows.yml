@@ -34,7 +34,8 @@ jobs:
         working-directory: src/CommsAI.Backend
         run: |
           pyinstaller --clean --noconfirm CommsAI.Backend.spec
-          if (!(Test-Path "dist/CommsAI.Backend.exe")) {
+
+          if (!(Test-Path "dist/CommsAI.Backend/CommsAI.Backend.exe")) {
             throw "Backend executable was not produced."
           }
 
@@ -57,15 +58,22 @@ jobs:
             -o publish
 
           New-Item -ItemType Directory -Force publish/backend | Out-Null
-          Copy-Item src/CommsAI.Backend/dist/CommsAI.Backend.exe publish/backend/CommsAI.Backend.exe -Force
+
+          Copy-Item `
+            src/CommsAI.Backend/dist/CommsAI.Backend/* `
+            publish/backend/ `
+            -Recurse `
+            -Force
 
       - name: Create portable ZIP
         shell: pwsh
-        run: Compress-Archive -Path publish/* -DestinationPath CommsAI-Portable.zip -Force
+        run: |
+          Compress-Archive -Path publish/* -DestinationPath CommsAI-Portable.zip -Force
 
       - name: Install Inno Setup
         shell: pwsh
-        run: choco install innosetup --yes --no-progress
+        run: |
+          choco install innosetup --yes --no-progress
 
       - name: Build installer
         shell: pwsh
