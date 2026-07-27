@@ -1,0 +1,11 @@
+.vs/
+bin/
+obj/
+publish/
+dist/
+build/
+__pycache__/
+*.pyc
+*.wav
+models/
+logs/
