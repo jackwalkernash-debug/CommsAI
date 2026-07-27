@@ -1,0 +1,20 @@
+HOW TO GET THE WINDOWS INSTALLER WITHOUT INSTALLING THE SDK
+
+1. Go to GitHub and create a new PRIVATE repository called CommsAI.
+2. Choose "uploading an existing file".
+3. Upload every file and folder contained in this CommsAI folder.
+   Important: include the hidden .github folder.
+4. Commit the files.
+5. Open the repository's Actions tab.
+6. Select "Build CommsAI Windows Release".
+7. Click "Run workflow".
+8. Wait for the build to finish.
+9. Open the completed workflow run.
+10. Download the CommsAI-Installer artifact.
+11. Extract the downloaded artifact and run the setup EXE.
+
+The build packages the GPU backend, so it may take a while and the resulting
+download may be large.
+
+Do not uninstall SteelSeries Sonar until CommsAI has successfully captured and
+translated normal Windows output on your PC.
