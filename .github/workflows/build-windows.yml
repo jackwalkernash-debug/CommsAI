@@ -1,0 +1,88 @@
+name: Build CommsAI Windows Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+          cache: "pip"
+          cache-dependency-path: src/CommsAI.Backend/requirements.txt
+
+      - name: Install backend dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/CommsAI.Backend/requirements.txt
+
+      - name: Build packaged GPU backend
+        shell: pwsh
+        working-directory: src/CommsAI.Backend
+        run: |
+          pyinstaller --clean --noconfirm CommsAI.Backend.spec
+          if (!(Test-Path "dist/CommsAI.Backend.exe")) {
+            throw "Backend executable was not produced."
+          }
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore Windows application
+        run: dotnet restore src/CommsAI.App/CommsAI.App.csproj
+
+      - name: Publish self-contained Windows application
+        shell: pwsh
+        run: |
+          dotnet publish src/CommsAI.App/CommsAI.App.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=false `
+            -o publish
+
+          New-Item -ItemType Directory -Force publish/backend | Out-Null
+          Copy-Item src/CommsAI.Backend/dist/CommsAI.Backend.exe publish/backend/CommsAI.Backend.exe -Force
+
+      - name: Create portable ZIP
+        shell: pwsh
+        run: Compress-Archive -Path publish/* -DestinationPath CommsAI-Portable.zip -Force
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/CommsAI.iss
+          Get-ChildItem installer/output
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: CommsAI-Portable
+          path: CommsAI-Portable.zip
+          retention-days: 14
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: CommsAI-Installer
+          path: installer/output/*.exe
+          retention-days: 14
