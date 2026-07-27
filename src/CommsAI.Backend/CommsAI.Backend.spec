@@ -1,26 +1,33 @@
-from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
 hiddenimports = []
 
-for package in [
+packages = [
     "faster_whisper",
     "ctranslate2",
     "tokenizers",
     "huggingface_hub",
     "av",
+    "requests",
+    "certifi",
+    "charset_normalizer",
+    "idna",
+    "urllib3",
     "nvidia.cublas",
     "nvidia.cudnn",
-]:
+]
+
+for package in packages:
     try:
         package_datas, package_binaries, package_hidden = collect_all(package)
         datas += package_datas
         binaries += package_binaries
         hiddenimports += package_hidden
-    except Exception:
-        pass
+        print(f"Collected package: {package}")
+    except Exception as exc:
+        print(f"Warning: failed to collect {package}: {exc}")
 
 a = Analysis(
     ["backend.py"],
@@ -40,13 +47,21 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="CommsAI.Backend",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
     console=False,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="CommsAI.Backend",
 )
