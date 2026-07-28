@@ -404,12 +404,15 @@ public sealed class MainForm : Form
         _processing.Text =
             $"Processing: {result.ProcessingSeconds:0.00}s";
 
-        _history.Rows.Insert(
-            0,
-            DateTime.Now.ToString("HH:mm:ss"),
-            result.Language,
-            result.English
-        );
+        if (!string.IsNullOrWhiteSpace(result.English))
+        {
+            _history.Rows.Insert(
+                0,
+                DateTime.Now.ToString("HH:mm:ss"),
+                result.Language,
+                result.English
+            );
+        }
 
         var normalisedEnglish = NormaliseForComparison(result.English);
         var isDuplicate =

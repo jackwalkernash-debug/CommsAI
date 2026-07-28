@@ -14,11 +14,15 @@ public sealed class AudioSegmenter : IDisposable
     private bool _suppressed;
     private int _silentMilliseconds;
     private int _totalMilliseconds;
+    private int _voicedMilliseconds;
+    private double _peakLevel;
 
-    public double StartThreshold { get; set; } = 0.012;
-    public double StopThreshold { get; set; } = 0.006;
+    public double StartThreshold { get; set; } = 0.020;
+    public double StopThreshold { get; set; } = 0.010;
+    public double MinimumPeakLevel { get; set; } = 0.030;
     public int SilenceToFinishMilliseconds { get; set; } = 650;
     public int MinimumSpeechMilliseconds { get; set; } = 500;
+    public int MinimumVoicedMilliseconds { get; set; } = 300;
     public int MaximumSegmentMilliseconds { get; set; } = 9000;
 
     public event Action<string>? SegmentReady;
@@ -80,6 +84,8 @@ public sealed class AudioSegmenter : IDisposable
 
                 _totalMilliseconds = milliseconds * _preRoll.Count;
                 _silentMilliseconds = 0;
+                _voicedMilliseconds = milliseconds;
+                _peakLevel = level;
             }
 
             return;
@@ -87,6 +93,10 @@ public sealed class AudioSegmenter : IDisposable
 
         _buffer.AddRange(copy);
         _totalMilliseconds += milliseconds;
+        _peakLevel = Math.Max(_peakLevel, level);
+        if (level >= StopThreshold)
+            _voicedMilliseconds += milliseconds;
+
         _silentMilliseconds = level < StopThreshold
             ? _silentMilliseconds + milliseconds
             : 0;
@@ -101,7 +111,9 @@ public sealed class AudioSegmenter : IDisposable
         var meaningfulMilliseconds =
             _totalMilliseconds - _silentMilliseconds;
 
-        if (meaningfulMilliseconds >= MinimumSpeechMilliseconds)
+        if (meaningfulMilliseconds >= MinimumSpeechMilliseconds &&
+            _voicedMilliseconds >= MinimumVoicedMilliseconds &&
+            _peakLevel >= MinimumPeakLevel)
             SaveSegment();
 
         Reset();
@@ -128,6 +140,8 @@ public sealed class AudioSegmenter : IDisposable
         _preRoll.Clear();
         _silentMilliseconds = 0;
         _totalMilliseconds = 0;
+        _voicedMilliseconds = 0;
+        _peakLevel = 0;
     }
 
     private static double CalculateRms(
