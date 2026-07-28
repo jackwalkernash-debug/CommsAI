@@ -11,6 +11,7 @@ public sealed class AudioSegmenter : IDisposable
     private readonly int _preRollChunks = 5;
 
     private bool _active;
+    private bool _suppressed;
     private int _silentMilliseconds;
     private int _totalMilliseconds;
 
@@ -23,6 +24,19 @@ public sealed class AudioSegmenter : IDisposable
     public event Action<string>? SegmentReady;
     public event Action<double>? LevelMeasured;
 
+    public bool Suppressed
+    {
+        get => _suppressed;
+        set
+        {
+            if (_suppressed == value)
+                return;
+
+            _suppressed = value;
+            Reset();
+        }
+    }
+
     public AudioSegmenter(WaveFormat inputFormat, string tempFolder)
     {
         _inputFormat = inputFormat;
@@ -32,6 +46,12 @@ public sealed class AudioSegmenter : IDisposable
 
     public void Push(byte[] data, int count)
     {
+        if (_suppressed)
+        {
+            LevelMeasured?.Invoke(0);
+            return;
+        }
+
         var copy = new byte[count];
         Buffer.BlockCopy(data, 0, copy, 0, count);
 
