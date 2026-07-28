@@ -206,8 +206,8 @@ def transcribe(path: str) -> None:
         str(audio_path),
         task="transcribe",
         language=None,
-        beam_size=5,
-        best_of=5,
+        beam_size=1,
+        best_of=1,
         temperature=0.0,
         vad_filter=True,
         vad_parameters={
@@ -264,8 +264,8 @@ def transcribe(path: str) -> None:
             if detected_language == "unknown"
             else detected_language
         ),
-        beam_size=5,
-        best_of=5,
+        beam_size=1,
+        best_of=1,
         temperature=0.0,
         vad_filter=True,
         vad_parameters={
