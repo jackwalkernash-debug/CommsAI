@@ -1,0 +1,6 @@
+CommsAI v0.3.1
+
+- Restores the CS2 vocabulary prompt for better recognition of short gaming callouts.
+- Keeps all v0.3 silence, energy, confidence and hallucination filters.
+- Does not include subtitle-style or literal-translation instructions in the Whisper prompt.
+- Updates application and installer version numbers to 0.3.1.
