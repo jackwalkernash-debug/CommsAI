@@ -7,7 +7,10 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import TextIO
+from typing import Iterable, TextIO
+import re
+import numpy as np
+import av
 
 
 def configure_text_stream(stream: TextIO | None) -> None:
@@ -177,12 +180,142 @@ def load_model(model_name: str, compute_type: str) -> None:
     status("GPU model ready. Listening...")
 
 
-def join_segments(segments) -> str:
-    return " ".join(
-        segment.text.strip()
-        for segment in segments
-        if segment.text and segment.text.strip()
-    ).strip()
+def normalise_text(value: str) -> str:
+    value = value.lower().replace("’", "'")
+    value = re.sub(r"[^a-z0-9\s']+", " ", value)
+    return " ".join(value.split())
+
+
+CS2_INITIAL_PROMPT = (
+    "Counter-Strike 2 team voice communications. "
+    "Common terms include A, B, mid, long, short, ramp, apps, palace, "
+    "connector, window, heaven, hell, site, rotate, rush, eco, force, "
+    "save, drop, flash, smoke, molotov, grenade, AWP, one, two, three."
+)
+
+HALLUCINATION_PHRASES = {
+    "translator's note",
+    "translators note",
+    "translated into english",
+    "translation into english",
+    "english translation",
+    "thank you for watching",
+    "thanks for watching",
+    "please subscribe",
+    "like and subscribe",
+    "subtitles by",
+    "captioned by",
+    "amara org community",
+    "copyright",
+}
+
+
+def looks_like_hallucination(text: str) -> bool:
+    normalised = normalise_text(text)
+    if not normalised:
+        return True
+
+    return any(
+        phrase in normalised
+        for phrase in HALLUCINATION_PHRASES
+    )
+
+
+def audio_rms_and_peak(path: Path) -> tuple[float, float, float]:
+    """Return duration seconds, RMS and peak for decoded audio."""
+    chunks: list[np.ndarray] = []
+    sample_rate = 0
+
+    with av.open(str(path)) as container:
+        audio_stream = next(
+            (stream for stream in container.streams if stream.type == "audio"),
+            None,
+        )
+        if audio_stream is None:
+            return 0.0, 0.0, 0.0
+
+        for frame in container.decode(audio_stream):
+            sample_rate = int(frame.sample_rate or sample_rate or 0)
+            array = frame.to_ndarray().astype(np.float32, copy=False)
+
+            if array.ndim > 1:
+                array = array.mean(axis=0)
+
+            # Integer audio needs normalising; float audio is already -1..1.
+            if np.issubdtype(frame.to_ndarray().dtype, np.integer):
+                max_value = float(np.iinfo(frame.to_ndarray().dtype).max)
+                if max_value > 0:
+                    array = array / max_value
+
+            chunks.append(array.reshape(-1))
+
+    if not chunks:
+        return 0.0, 0.0, 0.0
+
+    samples = np.concatenate(chunks)
+    samples = np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
+    duration = samples.size / sample_rate if sample_rate else 0.0
+    rms = float(np.sqrt(np.mean(np.square(samples), dtype=np.float64)))
+    peak = float(np.max(np.abs(samples)))
+    return duration, rms, peak
+
+
+def collect_segments(segments: Iterable) -> tuple[str, float, float, int]:
+    texts: list[str] = []
+    weighted_log_probability = 0.0
+    maximum_no_speech_probability = 0.0
+    segment_count = 0
+
+    for segment in segments:
+        text = (segment.text or "").strip()
+        if not text:
+            continue
+
+        texts.append(text)
+        segment_count += 1
+        weighted_log_probability += float(
+            getattr(segment, "avg_logprob", -99.0)
+        )
+        maximum_no_speech_probability = max(
+            maximum_no_speech_probability,
+            float(getattr(segment, "no_speech_prob", 0.0)),
+        )
+
+    average_log_probability = (
+        weighted_log_probability / segment_count
+        if segment_count
+        else -99.0
+    )
+
+    return (
+        " ".join(texts).strip(),
+        average_log_probability,
+        maximum_no_speech_probability,
+        segment_count,
+    )
+
+
+def emit_empty_result(
+    audio_path: Path,
+    started: float,
+    language: str = "unknown",
+    language_probability: float = 0.0,
+    reason: str = "No clear speech detected. Listening...",
+) -> None:
+    emit(
+        {
+            "type": "result",
+            "result": {
+                "language": language,
+                "language_probability": language_probability,
+                "original": "",
+                "english": "",
+                "processing_seconds": time.perf_counter() - started,
+                "source_path": str(audio_path),
+            },
+        }
+    )
+    status(reason)
 
 
 def transcribe(path: str) -> None:
@@ -200,7 +333,17 @@ def transcribe(path: str) -> None:
 
     started = time.perf_counter()
 
-    status("Transcribing captured speech...")
+    # Reject silent/tiny WAV files before spending GPU time on Whisper.
+    duration, rms, peak = audio_rms_and_peak(audio_path)
+    if duration < 0.45 or rms < 0.0045 or peak < 0.018:
+        emit_empty_result(
+            audio_path,
+            started,
+            reason="Background noise ignored. Listening...",
+        )
+        return
+
+    status("Checking captured speech...")
 
     original_segments, info = model.transcribe(
         str(audio_path),
@@ -209,46 +352,50 @@ def transcribe(path: str) -> None:
         beam_size=1,
         best_of=1,
         temperature=0.0,
+        initial_prompt=CS2_INITIAL_PROMPT,
         vad_filter=True,
         vad_parameters={
-            "min_silence_duration_ms": 250,
-            "speech_pad_ms": 250,
+            "threshold": 0.62,
+            "min_speech_duration_ms": 300,
+            "min_silence_duration_ms": 300,
+            "speech_pad_ms": 120,
         },
+        no_speech_threshold=0.55,
+        log_prob_threshold=-0.8,
+        compression_ratio_threshold=2.2,
         condition_on_previous_text=False,
-        initial_prompt=(
-            "Counter-Strike 2 professional team communication. "
-            "Common terms: A, B, mid, short, long, ramp, connector, "
-            "heaven, hell, palace, apartments, banana, pit, window, "
-            "jungle, stairs, CT, T spawn, bomb, AWP, flash, smoke, "
-            "molotov, rotate, save, eco, force, one HP."
-        ),
+        without_timestamps=False,
     )
 
-    original = join_segments(original_segments)
+    (
+        original,
+        average_log_probability,
+        maximum_no_speech_probability,
+        segment_count,
+    ) = collect_segments(original_segments)
 
     detected_language = info.language or "unknown"
     language_probability = float(
         info.language_probability or 0.0
     )
 
-    if not original:
-        processing_seconds = time.perf_counter() - started
+    rejected = (
+        segment_count == 0
+        or not original
+        or average_log_probability < -0.85
+        or maximum_no_speech_probability > 0.72
+        or language_probability < 0.30
+        or looks_like_hallucination(original)
+    )
 
-        emit(
-            {
-                "type": "result",
-                "result": {
-                    "language": detected_language,
-                    "language_probability": language_probability,
-                    "original": "",
-                    "english": "",
-                    "processing_seconds": processing_seconds,
-                    "source_path": str(audio_path),
-                },
-            }
+    if rejected:
+        emit_empty_result(
+            audio_path,
+            started,
+            detected_language,
+            language_probability,
+            "Unclear audio ignored. Listening...",
         )
-
-        status("No clear speech detected. Listening...")
         return
 
     status(
@@ -267,21 +414,44 @@ def transcribe(path: str) -> None:
         beam_size=1,
         best_of=1,
         temperature=0.0,
+        initial_prompt=CS2_INITIAL_PROMPT,
         vad_filter=True,
         vad_parameters={
-            "min_silence_duration_ms": 250,
-            "speech_pad_ms": 250,
+            "threshold": 0.62,
+            "min_speech_duration_ms": 300,
+            "min_silence_duration_ms": 300,
+            "speech_pad_ms": 120,
         },
+        no_speech_threshold=0.55,
+        log_prob_threshold=-0.8,
+        compression_ratio_threshold=2.2,
         condition_on_previous_text=False,
-        initial_prompt=(
-            "Counter-Strike 2 professional team communication. "
-            "Translate literally into English. Preserve player counts, "
-            "positions, bomb information, weapons, utility and commands. "
-            "Do not embellish."
-        ),
+        without_timestamps=False,
     )
 
-    english = join_segments(english_segments)
+    (
+        english,
+        english_average_log_probability,
+        english_no_speech_probability,
+        english_segment_count,
+    ) = collect_segments(english_segments)
+
+    if (
+        english_segment_count == 0
+        or not english
+        or english_average_log_probability < -0.85
+        or english_no_speech_probability > 0.72
+        or looks_like_hallucination(english)
+    ):
+        emit_empty_result(
+            audio_path,
+            started,
+            detected_language,
+            language_probability,
+            "Unreliable translation ignored. Listening...",
+        )
+        return
+
     processing_seconds = time.perf_counter() - started
 
     emit(
@@ -299,7 +469,6 @@ def transcribe(path: str) -> None:
     )
 
     status("Translation complete. Listening...")
-
 
 def main() -> None:
     status("AI backend started.")
