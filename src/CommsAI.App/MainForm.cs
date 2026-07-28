@@ -29,6 +29,10 @@ public sealed class MainForm : Form
     private readonly Queue<string> _pendingSegments = new();
     private bool _backendReady;
     private bool _processingSegment;
+    private string _lastSpokenText = "";
+    private DateTime _lastSpokenAt = DateTime.MinValue;
+    private readonly TimeSpan _duplicateWindow = TimeSpan.FromSeconds(8);
+    private readonly System.Windows.Forms.Timer _captureResumeTimer = new();
 
     public MainForm()
     {
@@ -40,6 +44,13 @@ public sealed class MainForm : Form
         Font = new Font("Segoe UI", 10);
 
         BuildUi();
+        _captureResumeTimer.Interval = 350;
+        _captureResumeTimer.Tick += (_, _) =>
+        {
+            _captureResumeTimer.Stop();
+            if (_segmenter is not null)
+                _segmenter.Suppressed = false;
+        };
         RefreshDevices();
         FormClosing += (_, _) => StopEverything();
     }
@@ -321,7 +332,15 @@ public sealed class MainForm : Form
             _segmenter.SegmentReady += path =>
             {
                 lock (_pendingSegments)
+                {
+                    // Real-time comms become useless if old clips queue up. Keep only
+                    // the newest two waiting segments and discard stale audio.
+                    while (_pendingSegments.Count >= 2)
+                        TryDelete(_pendingSegments.Dequeue());
+
                     _pendingSegments.Enqueue(path);
+                }
+
                 _ = ProcessNextSegmentAsync();
             };
 
@@ -392,11 +411,35 @@ public sealed class MainForm : Form
             result.English
         );
 
-        if (_speakBox.Checked && !string.IsNullOrWhiteSpace(result.English))
+        var normalisedEnglish = NormaliseForComparison(result.English);
+        var isDuplicate =
+            !string.IsNullOrWhiteSpace(normalisedEnglish) &&
+            normalisedEnglish == _lastSpokenText &&
+            DateTime.UtcNow - _lastSpokenAt <= _duplicateWindow;
+
+        if (_speakBox.Checked &&
+            !string.IsNullOrWhiteSpace(result.English) &&
+            !isDuplicate)
         {
+            _lastSpokenText = normalisedEnglish;
+            _lastSpokenAt = DateTime.UtcNow;
+
             _speech ??= new SpeechSynthesizer();
             _speech.SpeakAsyncCancelAll();
+
+            // WASAPI loopback captures everything played through the selected
+            // output, including our own TTS. Temporarily suppress segmentation
+            // until TTS finishes, then add a short tail guard.
+            if (_segmenter is not null)
+                _segmenter.Suppressed = true;
+
+            _speech.SpeakCompleted -= SpeechOnSpeakCompleted;
+            _speech.SpeakCompleted += SpeechOnSpeakCompleted;
             _speech.SpeakAsync(result.English);
+        }
+        else if (isDuplicate)
+        {
+            SetStatus("Duplicate translation ignored. Listening…");
         }
 
         if (!string.IsNullOrWhiteSpace(result.SourcePath))
@@ -405,6 +448,32 @@ public sealed class MainForm : Form
         _processingSegment = false;
         SetStatus("Listening…");
         _ = ProcessNextSegmentAsync();
+    }
+
+    private void SpeechOnSpeakCompleted(object? sender, SpeakCompletedEventArgs e)
+    {
+        Ui(() =>
+        {
+            _captureResumeTimer.Stop();
+            _captureResumeTimer.Start();
+        });
+    }
+
+    private static string NormaliseForComparison(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "";
+
+        var characters = value
+            .Where(character => char.IsLetterOrDigit(character) || char.IsWhiteSpace(character))
+            .ToArray();
+
+        return string.Join(
+            ' ',
+            new string(characters)
+                .ToLowerInvariant()
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+        );
     }
 
     private void StopEverything()
@@ -424,11 +493,14 @@ public sealed class MainForm : Form
         _backend?.Dispose();
         _backend = null;
 
+        _captureResumeTimer.Stop();
         _speech?.SpeakAsyncCancelAll();
         _speech?.Dispose();
         _speech = null;
 
         _backendReady = false;
+        _lastSpokenText = "";
+        _lastSpokenAt = DateTime.MinValue;
         _processingSegment = false;
 
         lock (_pendingSegments)
